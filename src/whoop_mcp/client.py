@@ -243,6 +243,11 @@ class WhoopClient:
 
     # ------------------------------------------------------------- endpoints
 
+    async def activity_mapping(self, activity_v1_id: int) -> dict[str, Any]:
+        return await self._get(
+            f"/v1/activity-mapping/{int(activity_v1_id)}", ttl=DETAIL_TTL
+        )
+
     async def profile(self) -> dict[str, Any]:
         return await self._get("/v2/user/profile/basic", ttl=PROFILE_TTL)
 

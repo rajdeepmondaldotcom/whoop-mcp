@@ -316,6 +316,25 @@ class FakeWhoop:
             return httpx.Response(200, json=PROFILE)
         if path == "/developer/v2/user/measurement/body":
             return httpx.Response(200, json=BODY)
+        if path.startswith("/developer/v1/activity-mapping/"):
+            raw_id = path[len("/developer/v1/activity-mapping/") :]
+            try:
+                activity_v1_id = int(raw_id)
+            except ValueError:
+                return httpx.Response(400, json={"message": "invalid activity id"})
+            found = next(
+                (
+                    record
+                    for record in [*self.sleeps, *self.workouts]
+                    if record.get("v1_id") == activity_v1_id
+                ),
+                None,
+            )
+            return (
+                httpx.Response(200, json={"v2_activity_id": found["id"]})
+                if found
+                else httpx.Response(404, json={"message": "mapping not found"})
+            )
         if path == "/developer/v2/cycle":
             return self._collection(self.cycles, params, sort_key="start")
         if path == "/developer/v2/recovery":

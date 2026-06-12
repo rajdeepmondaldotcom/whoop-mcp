@@ -269,12 +269,26 @@ def _clamp_limit(limit: int) -> int:
     title="WHOOP profile",
     annotations=READ_ONLY,
 )
-async def get_profile() -> dict[str, Any]:
+async def get_profile(include_raw: bool = False) -> dict[str, Any]:
     """Get the user's WHOOP profile and body measurements (name, email, height,
-    weight, max heart rate)."""
+    weight, max heart rate). Set include_raw=true to also attach WHOOP's
+    untouched profile and body-measurement records."""
     client = await get_client()
     profile, body = await asyncio.gather(client.profile(), client.body_measurement())
-    return transform_profile(profile or {}, body or {})
+    out = transform_profile(profile or {}, body or {})
+    if include_raw:
+        out["raw"] = {"profile": profile or {}, "body_measurement": body or {}}
+    return out
+
+
+@mcp.tool(
+    title="Activity ID mapping",
+    annotations=READ_ONLY,
+)
+async def get_activity_mapping(activity_v1_id: int) -> dict[str, Any]:
+    """Map a legacy WHOOP v1 activity id to its v2 UUID. Useful when older
+    exports, links, or integrations refer to an activity by v1_id."""
+    return await (await get_client()).activity_mapping(activity_v1_id)
 
 
 @mcp.tool(
@@ -645,13 +659,16 @@ async def get_personal_records(days: int = 180) -> dict[str, Any]:
     title="Sleep sensor stream",
     annotations=READ_ONLY,
 )
-async def get_sleep_stream(sleep_id: str, resolution_minutes: int = 5) -> dict[str, Any]:
+async def get_sleep_stream(
+    sleep_id: str, resolution_minutes: int = 5, include_raw: bool = False
+) -> dict[str, Any]:
     """Minute-level overnight sensor data for one sleep: heart rate and skin
     temperature curves (downsampled to resolution_minutes buckets) plus
     overnight stats like the lowest heart rate and when it happened. Get the
     sleep_id from get_sleeps, get_daily_summary, or a recovery record. WHOOP
     does not expose this stream for every account/app - if unavailable, a
-    clear note is returned instead of an error."""
+    clear note is returned instead of an error. Set include_raw=true to also
+    attach WHOOP's untouched stream payload."""
     client = await get_client()
     sleep = await client.sleep(sleep_id)
     try:
@@ -685,6 +702,8 @@ async def get_sleep_stream(sleep_id: str, resolution_minutes: int = 5) -> dict[s
     )
     out["sleep_id"] = sleep_id
     out["available"] = True
+    if include_raw:
+        out["raw"] = stream or {}
     if sleep.get("end"):
         out["date"] = str(record_local_date(sleep["end"], sleep.get("timezone_offset")))
     return out

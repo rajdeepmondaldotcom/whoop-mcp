@@ -38,7 +38,7 @@ WRITE_TOOLS = {"connect_whoop_account", "export_data"}
 
 async def test_lists_all_tools_with_correct_annotations(session):
     tools = (await session.list_tools()).tools
-    assert len(tools) == 23
+    assert len(tools) == 24
     for tool in tools:
         assert tool.annotations is not None, tool.name
         expected_read_only = tool.name not in WRITE_TOOLS
@@ -50,6 +50,7 @@ async def test_lists_all_tools_with_correct_annotations(session):
         "get_correlations",
         "get_personal_records",
         "get_sleep_stream",
+        "get_activity_mapping",
         "export_data",
         "connect_whoop_account",
         "get_connection_status",
@@ -65,6 +66,20 @@ async def test_get_profile(session):
     data = result_json(result)
     assert data["name"] == "Ada Lovelace"
     assert data["body"]["max_heart_rate"] == 195
+
+
+async def test_get_profile_can_include_raw_records(session):
+    data = result_json(await session.call_tool("get_profile", {"include_raw": True}))
+    assert data["raw"]["profile"]["first_name"] == "Ada"
+    assert data["raw"]["body_measurement"]["height_meter"] == 1.7
+
+
+async def test_activity_v1_mapping(session, fake_whoop: FakeWhoop):
+    sleep = fake_whoop.sleeps[0]
+    data = result_json(
+        await session.call_tool("get_activity_mapping", {"activity_v1_id": sleep["v1_id"]})
+    )
+    assert data["v2_activity_id"] == sleep["id"]
 
 
 async def test_daily_summary_for_yesterday(session):
@@ -212,10 +227,13 @@ async def test_sleep_stream_available_and_unavailable(session, fake_whoop: FakeW
     fake_whoop.seed_stream(sleep["id"], parse_iso(sleep["start"]), parse_iso(sleep["end"]))
     data = result_json(
         await session.call_tool(
-            "get_sleep_stream", {"sleep_id": sleep["id"], "resolution_minutes": 10}
+            "get_sleep_stream",
+            {"sleep_id": sleep["id"], "resolution_minutes": 10, "include_raw": True},
         )
     )
     assert data["available"] is True
+    assert data["raw"]["algorithm_version"] == "5.0"
+    assert data["raw"]["stream"][0]["board_temp"] == 30.1
     assert data["heart_rate"]["min"] < data["heart_rate"]["max"]
     assert data["heart_rate"]["min"] == 48
     assert len(data["series"]) >= 40  # ~7.75h at 10-minute buckets
