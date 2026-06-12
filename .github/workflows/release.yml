@@ -17,9 +17,10 @@ jobs:
           python-version: "3.12"
       - name: Test
         run: |
-          uv pip install --system -e ".[dev]"
-          ruff check .
-          pytest
+          uv venv
+          uv pip install -e ".[dev]"
+          uv run ruff check .
+          uv run pytest
       - name: Build
         run: uv build
       - name: GitHub release
