@@ -1,6 +1,8 @@
 import random
 from datetime import date, timedelta
 
+import pytest
+
 from whoop_mcp.analytics import (
     DayValue,
     acute_chronic_ratio,
@@ -107,6 +109,28 @@ def test_compare_metric_polarity_and_deadband():
     out = compare_metric("strain", 10.0, 14.0)
     assert out["assessment"] == "increased"
     assert compare_metric("strain", None, 14.0) is None
+
+
+def test_pearson_known_values():
+    from whoop_mcp.analytics import pearson
+
+    assert pearson([(1, 2), (2, 4), (3, 6)]) == pytest.approx(1.0)
+    assert pearson([(1, 6), (2, 4), (3, 2)]) == pytest.approx(-1.0)
+    assert pearson([(1, 1)]) is None
+    assert pearson([(1, 5), (2, 5), (3, 5)]) is None  # no variance in y
+
+
+def test_describe_correlation_labels():
+    from whoop_mcp.analytics import describe_correlation
+
+    pairs = [(float(i), float(i) * 2 + (i % 3)) for i in range(20)]
+    out = describe_correlation("strain", "recovery", pairs)
+    assert out["strength"] == "strong"
+    assert out["r"] > 0.9
+    assert "higher recovery" in out["interpretation"]
+
+    sparse = describe_correlation("a", "b", [(1.0, 2.0)] * 3)
+    assert "Not enough" in sparse["note"]
 
 
 def test_compare_metric_zero_baseline():

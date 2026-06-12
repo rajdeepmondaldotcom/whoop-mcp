@@ -10,9 +10,10 @@ timezone, which is where the user actually was.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
-from whoop_mcp.timeutil import local_iso, parse_iso, record_local_date
+from whoop_mcp.timeutil import local_iso, parse_iso, record_local_date, record_local_datetime
 
 MS_PER_MINUTE = 60_000
 MS_PER_HOUR = 3_600_000
@@ -273,6 +274,7 @@ def transform_workout(workout: dict[str, Any]) -> dict[str, Any]:
             rounded(distance_m / 1000 * MILES_PER_KM, 2) if distance_m is not None else None
         ),
         "elevation_gain_m": rounded(score.get("altitude_gain_meter"), 0),
+        "elevation_change_m": rounded(score.get("altitude_change_meter"), 0),
         "percent_recorded": rounded(score.get("percent_recorded"), 0),
         "heart_rate_zones": prune(zones) or None,
     }
@@ -283,6 +285,106 @@ def transform_workout(workout: dict[str, Any]) -> dict[str, Any]:
 
 def _legacy_sport(sport_id: Any) -> str | None:
     return f"sport_id:{sport_id}" if sport_id is not None else None
+
+
+# ------------------------------------------------------------- sleep stream
+
+
+def transform_sleep_stream(
+    payload: dict[str, Any],
+    *,
+    offset: str | None,
+    resolution_minutes: int = 5,
+) -> dict[str, Any]:
+    """Summarize + downsample a granular in-sleep sensor stream.
+
+    Raw streams hold one point every few seconds — thousands of rows. The
+    model gets per-bucket averages at ``resolution_minutes`` plus overnight
+    statistics, which is what overnight HR/temperature questions need.
+    """
+    points = sorted(
+        (p for p in payload.get("stream") or [] if p.get("timestamp")),
+        key=lambda p: p["timestamp"],
+    )
+    if not points:
+        return {"note": "The stream contained no data points."}
+
+    resolution_minutes = max(1, min(int(resolution_minutes), 60))
+    bucket_ms = resolution_minutes * MS_PER_MINUTE
+    first_ts = parse_iso(points[0]["timestamp"])
+
+    buckets: dict[int, dict[str, list[float]]] = {}
+    hr_values: list[tuple[str, float]] = []
+    temp_values: list[float] = []
+    sleeping = 0
+    for point in points:
+        if point.get("hr") is not None:
+            hr_values.append((point["timestamp"], float(point["hr"])))
+        if point.get("skin_temp") is not None:
+            temp_values.append(float(point["skin_temp"]))
+        if point.get("is_sleeping"):
+            sleeping += 1
+        index = int(
+            (parse_iso(point["timestamp"]) - first_ts).total_seconds() * 1000 // bucket_ms
+        )
+        bucket = buckets.setdefault(index, {"hr": [], "skin_temp": []})
+        if point.get("hr") is not None:
+            bucket["hr"].append(float(point["hr"]))
+        if point.get("skin_temp") is not None:
+            bucket["skin_temp"].append(float(point["skin_temp"]))
+
+    def local_clock(ts: str) -> str:
+        return record_local_datetime(ts, offset).strftime("%H:%M")
+
+    series = []
+    for index in sorted(buckets):
+        bucket = buckets[index]
+        moment = first_ts.timestamp() + index * bucket_ms / 1000
+        ts = datetime.fromtimestamp(moment, tz=timezone.utc).isoformat()
+        series.append(
+            prune(
+                {
+                    "t": local_clock(ts),
+                    "hr": rounded(sum(bucket["hr"]) / len(bucket["hr"]), 0)
+                    if bucket["hr"]
+                    else None,
+                    "skin_temp_c": rounded(sum(bucket["skin_temp"]) / len(bucket["skin_temp"]))
+                    if bucket["skin_temp"]
+                    else None,
+                }
+            )
+        )
+
+    heart_rate = None
+    if hr_values:
+        lowest = min(hr_values, key=lambda pair: pair[1])
+        heart_rate = {
+            "min": int(min(v for _, v in hr_values)),
+            "avg": int(round(sum(v for _, v in hr_values) / len(hr_values))),
+            "max": int(max(v for _, v in hr_values)),
+            "lowest_at": local_clock(lowest[0]),
+        }
+    skin_temp = None
+    if temp_values:
+        skin_temp = {
+            "min_c": rounded(min(temp_values)),
+            "avg_c": rounded(sum(temp_values) / len(temp_values)),
+            "max_c": rounded(max(temp_values)),
+        }
+
+    return prune(
+        {
+            "from": local_clock(points[0]["timestamp"]),
+            "to": local_clock(points[-1]["timestamp"]),
+            "data_points": len(points),
+            "pct_asleep": int(round(sleeping / len(points) * 100)),
+            "heart_rate": heart_rate,
+            "skin_temp": skin_temp,
+            "resolution_minutes": resolution_minutes,
+            "series": series,
+            "algorithm_version": payload.get("algorithm_version"),
+        }
+    )
 
 
 def _score_note(state: str | None) -> str:

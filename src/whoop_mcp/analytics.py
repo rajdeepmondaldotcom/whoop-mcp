@@ -182,6 +182,68 @@ def acute_chronic_ratio(daily_strain: dict[date, float], today: date) -> dict[st
     }
 
 
+def pearson(pairs: Sequence[tuple[float, float]]) -> float | None:
+    """Pearson correlation coefficient, or None when undefined (n<2 or no variance)."""
+    n = len(pairs)
+    if n < 2:
+        return None
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    var_y = sum((y - mean_y) ** 2 for y in ys)
+    if var_x == 0 or var_y == 0:
+        return None
+    return cov / (var_x**0.5 * var_y**0.5)
+
+
+def correlation_strength(r: float) -> str:
+    magnitude = abs(r)
+    if magnitude >= 0.6:
+        return "strong"
+    if magnitude >= 0.35:
+        return "moderate"
+    if magnitude >= 0.15:
+        return "weak"
+    return "negligible"
+
+
+def describe_correlation(
+    label_x: str, label_y: str, pairs: Sequence[tuple[float, float]], *, min_n: int = 10
+) -> dict[str, Any] | None:
+    """Human-interpretable correlation between two daily metrics."""
+    if len(pairs) < min_n:
+        return {
+            "pair": f"{label_x} vs {label_y}",
+            "n": len(pairs),
+            "note": f"Not enough overlapping days (need at least {min_n}).",
+        }
+    r = pearson(pairs)
+    if r is None:
+        return {
+            "pair": f"{label_x} vs {label_y}",
+            "n": len(pairs),
+            "note": "One of the metrics shows no variation in this window.",
+        }
+    strength = correlation_strength(r)
+    direction = "higher" if r > 0 else "lower"
+    interpretation = (
+        f"{strength} correlation: days with higher {label_x} tend to have "
+        f"{direction} {label_y}."
+        if strength != "negligible"
+        else f"no meaningful relationship between {label_x} and {label_y} in this window."
+    )
+    return {
+        "pair": f"{label_x} vs {label_y}",
+        "r": round(r, 3),
+        "n": len(pairs),
+        "strength": strength,
+        "interpretation": interpretation,
+    }
+
+
 def compare_metric(
     metric: str, value_a: float | None, value_b: float | None, *, deadband: float = 0.03
 ) -> dict[str, Any] | None:

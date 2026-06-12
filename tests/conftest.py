@@ -225,6 +225,7 @@ class FakeWhoop:
         self.recoveries: list[dict[str, Any]] = []
         self.sleeps: list[dict[str, Any]] = []
         self.workouts: list[dict[str, Any]] = []
+        self.streams: dict[str, dict[str, Any]] = {}
         self.requests: list[str] = []
         self.expected_token = "test-token"
 
@@ -280,6 +281,27 @@ class FakeWhoop:
                     )
                 )
 
+    def seed_stream(self, sleep_id: str, start: datetime, end: datetime) -> None:
+        """Attach a plausible per-minute HR/skin-temp stream to a sleep."""
+        points = []
+        total_minutes = max(int((end - start).total_seconds() // 60), 1)
+        for minute in range(total_minutes):
+            progress = minute / total_minutes
+            # HR dips toward the middle of the night, recovers toward waking.
+            hr = 60 - 12 * (1 - abs(2 * progress - 1))
+            points.append(
+                {
+                    "timestamp": iso(start + timedelta(minutes=minute)),
+                    "hr": round(hr),
+                    "skin_temp": round(33.0 + 0.6 * progress, 2),
+                    "board_temp": 30.1,
+                    "battery_temp": 29.5,
+                    "is_sleeping": minute > 3,
+                    "is_charging": False,
+                }
+            )
+        self.streams[sleep_id] = {"stream": points, "algorithm_version": "5.0"}
+
     # -- request handling
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -302,6 +324,15 @@ class FakeWhoop:
             return self._collection(self.sleeps, params, sort_key="start")
         if path == "/developer/v2/activity/workout":
             return self._collection(self.workouts, params, sort_key="start")
+
+        if path.startswith("/developer/v2/activity/sleep/") and path.endswith("/stream"):
+            ident = path[len("/developer/v2/activity/sleep/") : -len("/stream")]
+            stream = self.streams.get(ident)
+            return (
+                httpx.Response(200, json=stream)
+                if stream
+                else httpx.Response(404, json={"message": "no stream"})
+            )
 
         for prefix, records, key in (
             ("/developer/v2/activity/sleep/", self.sleeps, "id"),

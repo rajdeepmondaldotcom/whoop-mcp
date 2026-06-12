@@ -19,6 +19,7 @@ from whoop_mcp.analytics import (
     acute_chronic_ratio,
     average,
     compare_metric,
+    describe_correlation,
     describe_series,
 )
 from whoop_mcp.client import WhoopClient
@@ -593,3 +594,236 @@ def compare_aggregates(agg_a: dict[str, Any], agg_b: dict[str, Any]) -> dict[str
         if result is not None:
             comparison[metric] = result
     return comparison
+
+
+# --------------------------------------------------------------- daily table
+
+
+def _daily_metric_table(bundle: Bundle, start: date, end: date) -> dict[date, dict[str, Any]]:
+    """One row per day joining recovery, sleep, and strain — the substrate for
+    correlations, records, and the health overview."""
+    table: dict[date, dict[str, Any]] = {}
+
+    def row(day: date) -> dict[str, Any]:
+        return table.setdefault(day, {})
+
+    for day, recovery in recovery_day_points(bundle.recoveries, bundle.cycles):
+        if not (start <= day <= end) or recovery.get("score_state") != SCORED:
+            continue
+        score = recovery.get("score") or {}
+        row(day).update(
+            recovery=score.get("recovery_score"),
+            hrv=score.get("hrv_rmssd_milli"),
+            rhr=score.get("resting_heart_rate"),
+        )
+    for sleep in bundle.sleeps:
+        day = sleep_date(sleep)
+        if (
+            day is None
+            or not (start <= day <= end)
+            or sleep.get("nap")
+            or sleep.get("score_state") != SCORED
+        ):
+            continue
+        score = sleep.get("score") or {}
+        hours = ms_to_hours(_asleep_ms(sleep))
+        existing = row(day)
+        if existing.get("sleep_hours") is None or (hours or 0) > existing["sleep_hours"]:
+            existing.update(
+                sleep_hours=hours,
+                sleep_performance=score.get("sleep_performance_percentage"),
+                sleep_consistency=score.get("sleep_consistency_percentage"),
+                sleep_id=sleep.get("id"),
+            )
+    for cycle in bundle.cycles:
+        day = cycle_date(cycle)
+        if day is None or not (start <= day <= end) or cycle.get("score_state") != SCORED:
+            continue
+        score = cycle.get("score") or {}
+        row(day).update(
+            strain=score.get("strain"), calories=kj_to_kcal(score.get("kilojoule"))
+        )
+    for workout in bundle.workouts:
+        day = workout_date(workout)
+        if day is None or not (start <= day <= end):
+            continue
+        row(day)["workouts"] = row(day).get("workouts", 0) + 1
+    return dict(sorted(table.items()))
+
+
+# -------------------------------------------------------------- correlations
+
+
+def build_correlations(bundle: Bundle, start: date, end: date) -> dict[str, Any]:
+    """How the user's behaviors and physiology move together, day to day."""
+    table = _daily_metric_table(bundle, start, end)
+    days = sorted(table)
+
+    def pairs(metric_x: str, metric_y: str, *, lag_days: int = 0) -> list[tuple[float, float]]:
+        out = []
+        for day in days:
+            other = day + timedelta(days=lag_days)
+            x = table.get(day, {}).get(metric_x)
+            y = table.get(other, {}).get(metric_y)
+            if x is not None and y is not None:
+                out.append((float(x), float(y)))
+        return out
+
+    correlations = [
+        describe_correlation(
+            "day strain", "next-morning recovery", pairs("strain", "recovery", lag_days=1)
+        ),
+        describe_correlation(
+            "sleep duration (hours)", "same-morning recovery", pairs("sleep_hours", "recovery")
+        ),
+        describe_correlation(
+            "sleep consistency", "recovery", pairs("sleep_consistency", "recovery")
+        ),
+        describe_correlation(
+            "day strain", "that night's sleep duration", pairs("strain", "sleep_hours", lag_days=1)
+        ),
+        describe_correlation("HRV", "recovery", pairs("hrv", "recovery")),
+    ]
+    notes = [
+        "Correlation is not causation; treat these as hypotheses to test.",
+    ]
+    if bundle.truncated:
+        notes.append(f"Some collections were truncated: {', '.join(bundle.truncated)}.")
+    return prune(
+        {
+            "period": _period(start, end),
+            "days_analyzed": len(days),
+            "correlations": [c for c in correlations if c is not None],
+            "notes": notes,
+        }
+    )
+
+
+# ---------------------------------------------------------- personal records
+
+
+def build_personal_records(bundle: Bundle, start: date, end: date) -> dict[str, Any]:
+    """Bests, worsts, streaks, and totals across the window."""
+    table = _daily_metric_table(bundle, start, end)
+
+    def extreme(metric: str, *, best: bool) -> dict[str, Any] | None:
+        rows = [(d, r[metric]) for d, r in table.items() if r.get(metric) is not None]
+        if not rows:
+            return None
+        day, value = (max if best else min)(rows, key=lambda pair: pair[1])
+        return {"date": str(day), "value": rounded(value, 1)}
+
+    # Green-recovery streaks (>= 67%).
+    current_streak = longest_streak = 0
+    streak = 0
+    for day in sorted(table):
+        recovery = table[day].get("recovery")
+        if recovery is not None and recovery >= 67:
+            streak += 1
+            longest_streak = max(longest_streak, streak)
+        elif recovery is not None:
+            streak = 0
+    current_streak = streak
+
+    best_workout = None
+    scored_workouts = [
+        w
+        for w in bundle.workouts
+        if w.get("score_state") == SCORED
+        and (w.get("score") or {}).get("strain") is not None
+        and (d := workout_date(w))
+        and start <= d <= end
+    ]
+    if scored_workouts:
+        top = max(scored_workouts, key=lambda w: w["score"]["strain"])
+        best_workout = {
+            "sport": top.get("sport_name") or "workout",
+            "date": str(workout_date(top)),
+            "strain": rounded(top["score"]["strain"]),
+            "calories": kj_to_kcal(top["score"].get("kilojoule")),
+            "id": top.get("id"),
+        }
+
+    total_distance_m = sum(
+        (w.get("score") or {}).get("distance_meter") or 0 for w in scored_workouts
+    )
+    totals = prune(
+        {
+            "days_with_data": len(table),
+            "workouts": len(
+                [w for w in bundle.workouts if (d := workout_date(w)) and start <= d <= end]
+            ),
+            "calories": sum(r.get("calories") or 0 for r in table.values()) or None,
+            "distance_km": rounded(total_distance_m / 1000, 1) if total_distance_m else None,
+        }
+    )
+
+    return prune(
+        {
+            "period": _period(start, end),
+            "best_recovery": extreme("recovery", best=True),
+            "worst_recovery": extreme("recovery", best=False),
+            "highest_hrv": extreme("hrv", best=True),
+            "lowest_rhr": extreme("rhr", best=False),
+            "longest_sleep_hours": extreme("sleep_hours", best=True),
+            "highest_strain_day": extreme("strain", best=True),
+            "biggest_workout": best_workout,
+            "green_streak": {
+                "current_days": current_streak,
+                "longest_days": longest_streak,
+            },
+            "totals": totals,
+        }
+    )
+
+
+# ------------------------------------------------------------ health overview
+
+
+def build_health_overview(
+    bundle: Bundle, start: date, end: date, *, today: date
+) -> dict[str, Any]:
+    """The everything-at-once view: where you stand now, how the window
+    trended, training load, records, and the strongest correlations."""
+    latest = build_daily_summary(bundle, today, today=today)
+    recovery = recovery_trends(bundle, start, end)
+    sleep = sleep_trends(bundle, start, end)
+    strain = strain_trends(bundle, start, end, today=today)
+
+    def compact(trend: dict[str, Any] | None, *keys: str) -> dict[str, Any] | None:
+        if not trend:
+            return None
+        out: dict[str, Any] = {}
+        for key in keys:
+            block = trend.get(key)
+            if not isinstance(block, dict):
+                continue
+            entry = {"average": block.get("average")}
+            if "trend" in block:
+                entry["direction"] = block["trend"]["direction"]
+            out[key] = entry
+        return out or None
+
+    return prune(
+        {
+            "period": _period(start, end),
+            "today": latest,
+            "trends": {
+                "recovery": compact(
+                    recovery, "recovery_score", "hrv_ms", "resting_heart_rate"
+                ),
+                "sleep": compact(
+                    sleep, "sleep_hours", "performance_pct", "consistency_pct", "debt_minutes"
+                ),
+                "strain": compact(strain, "day_strain", "daily_calories"),
+            },
+            "training_load": strain.get("training_load"),
+            "workouts_by_sport": (strain.get("workouts") or {}).get("by_sport"),
+            "records": build_personal_records(bundle, start, end),
+            "correlations": build_correlations(bundle, start, end).get("correlations"),
+            "notes": [
+                "Use get_recovery_trends / get_sleep_trends / get_strain_trends for the "
+                "full daily tables behind these numbers."
+            ],
+        }
+    )

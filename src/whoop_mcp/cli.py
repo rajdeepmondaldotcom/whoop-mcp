@@ -51,6 +51,138 @@ def _apply_overrides(settings: Settings, args: argparse.Namespace) -> Settings:
 # ---------------------------------------------------------------- commands
 
 
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Guided end-to-end setup: app credentials → OAuth → client config → test."""
+    import webbrowser
+
+    from whoop_mcp import clients, oauth
+    from whoop_mcp.config import DEFAULT_REDIRECT_URI
+
+    if not sys.stdin.isatty():
+        print(
+            "error: `whoop-mcp setup` is interactive — run it in a terminal.\n"
+            "(For scripted setups use `whoop-mcp auth --client-id ... --client-secret ...`.)",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("\n┌─ whoop-mcp setup ─────────────────────────────────────────────┐")
+    print("│ Connects your WHOOP account and configures your AI clients.   │")
+    print("└────────────────────────────────────────────────────────────────┘\n")
+
+    settings = load_settings()
+
+    # Step 1 — WHOOP app credentials.
+    if settings.client_id and settings.client_secret:
+        print("✓ Step 1/4 — WHOOP app credentials already configured.\n")
+    else:
+        print("Step 1/4 — WHOOP developer app (one time, ~2 minutes, free)\n")
+        print("  1. Sign in with your normal WHOOP account and create a Team, then an App:")
+        print("       https://developer-dashboard.whoop.com")
+        print("  2. In the app settings:")
+        print("       • Scopes: enable ALL of them (including `offline`)")
+        print(f"       • Redirect URI: add exactly  {DEFAULT_REDIRECT_URI}")
+        print("  3. Copy the Client ID and Client Secret.\n")
+        if input("  Open the dashboard in your browser now? [Y/n] ").strip().lower() not in (
+            "n",
+            "no",
+        ):
+            webbrowser.open("https://developer-dashboard.whoop.com")
+        print()
+        client_id = input("  Paste Client ID: ").strip()
+        client_secret = getpass.getpass("  Paste Client Secret (input hidden): ").strip()
+        if not client_id or not client_secret:
+            print("error: both values are required.", file=sys.stderr)
+            return 1
+        path = save_credentials(
+            settings.data_dir, client_id=client_id, client_secret=client_secret
+        )
+        print(f"\n✓ Saved to {path} (0600 permissions).\n")
+        settings = load_settings()
+
+    # Step 2 — authorize with WHOOP.
+    existing = TokenStore(settings.tokens_path).load()
+    if existing and not existing.expires_within(0):
+        print("✓ Step 2/4 — WHOOP account already connected.\n")
+    else:
+        print("Step 2/4 — Authorize with WHOOP (your browser will open)\n")
+        tokens = oauth.run_interactive_auth(settings)
+        TokenStore(settings.tokens_path).save(tokens)
+        print(f"✓ Tokens saved to {settings.tokens_path}.\n")
+
+    # Step 3 — verify end to end.
+    print("Step 3/4 — Verifying with a live API call...")
+
+    async def _verify() -> str:
+        from whoop_mcp.client import WhoopClient
+        from whoop_mcp.transform import recovery_zone
+
+        manager = TokenManager(
+            TokenStore(settings.tokens_path),
+            lambda token: oauth.refresh_token(settings, token),
+            static_access_token=settings.static_access_token,
+        )
+        client = WhoopClient(manager, timeout=settings.request_timeout)
+        try:
+            profile = await client.profile()
+            recoveries, _ = await client.recoveries(max_records=1)
+        finally:
+            await client.aclose()
+        name = " ".join(
+            part for part in (profile.get("first_name"), profile.get("last_name")) if part
+        )
+        line = f"Connected as {name or profile.get('user_id')}"
+        if recoveries and (recoveries[0].get("score") or {}).get("recovery_score") is not None:
+            score = recoveries[0]["score"]["recovery_score"]
+            line += f" — latest recovery {round(score)}% ({recovery_zone(score)})"
+        return line
+
+    print(f"✓ {asyncio.run(_verify())}.\n")
+
+    # Step 4 — configure AI clients.
+    print("Step 4/4 — Connect your AI clients\n")
+    binary = clients.find_binary()
+    configured_any = False
+
+    if clients.claude_desktop_detected() and not args.skip_clients:
+        answer = input("  Claude Desktop detected. Add whoop-mcp to it now? [Y/n] ")
+        if answer.strip().lower() not in ("n", "no"):
+            path, action = clients.install_into_claude_desktop(binary)
+            configured_any = True
+            if action == "unchanged":
+                print(f"  ✓ Already configured in {path}")
+            else:
+                print(f"  ✓ {action.capitalize()} in {path} (backup written)")
+                print("    → Fully quit and reopen Claude Desktop to load it.")
+    if clients.claude_code_detected() and not args.skip_clients:
+        command = clients.claude_code_command(binary)
+        answer = input("\n  Claude Code detected. Register whoop-mcp with it now? [Y/n] ")
+        if answer.strip().lower() not in ("n", "no"):
+            import subprocess
+
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode == 0:
+                configured_any = True
+                print("  ✓ Registered with Claude Code (user scope).")
+            else:
+                print(f"  ✗ `{' '.join(command)}` failed: {result.stderr.strip()[:200]}")
+                print("    Run it manually if needed.")
+    if not configured_any:
+        print("  Manual config (any MCP client):")
+        print(f'    command: "{binary}"   args: ["serve"]')
+        print("  ChatGPT (remote connector):")
+        print(f"    {binary} serve --transport http --port 8000   # endpoint: /mcp")
+        print("    then tunnel it (e.g. ngrok http 8000) and add the URL in")
+        print("    ChatGPT → Settings → Apps & Connectors → Developer mode.")
+
+    print("\n┌────────────────────────────────────────────────────────────────┐")
+    print("│ Done. Try asking your AI:                                      │")
+    print('│   "How did I sleep last night?"                                │')
+    print('│   "Give me a full overview of my health this quarter."         │')
+    print("└────────────────────────────────────────────────────────────────┘")
+    return 0
+
+
 def cmd_auth(args: argparse.Namespace) -> int:
     from whoop_mcp import oauth
 
@@ -248,6 +380,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"whoop-mcp {__version__}")
     sub = parser.add_subparsers(dest="command")
 
+    setup = sub.add_parser(
+        "setup",
+        help="Guided setup: WHOOP app → authorize → auto-configure Claude (start here!)",
+    )
+    setup.add_argument(
+        "--skip-clients",
+        action="store_true",
+        help="Skip auto-configuring Claude Desktop / Claude Code",
+    )
+    setup.set_defaults(func=cmd_setup)
+
     auth = sub.add_parser("auth", help="Connect your WHOOP account (opens a browser)")
     auth.add_argument("--client-id", help="WHOOP app client id")
     auth.add_argument("--client-secret", help="WHOOP app client secret")
@@ -291,8 +434,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
-        # No subcommand: default to serving stdio so bare `whoop-mcp` works in
-        # MCP client configs.
+        if sys.stdin.isatty():
+            # A human at a terminal almost never wants a silent stdio server.
+            parser.print_help()
+            print("\nFirst time here? Run:  whoop-mcp setup")
+            sys.exit(0)
+        # Spawned by an MCP client (stdin is a pipe): serve stdio so a bare
+        # `whoop-mcp` works in client configs.
         args = parser.parse_args(["serve"])
     try:
         sys.exit(args.func(args))

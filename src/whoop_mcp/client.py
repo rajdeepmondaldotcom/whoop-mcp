@@ -30,9 +30,9 @@ from whoop_mcp.timeutil import to_api_iso
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 25  # WHOOP's maximum per-page limit
-MAX_PAGES = 40  # hard backstop regardless of requested record cap
+MAX_PAGES = 60  # hard backstop regardless of requested record cap
 DEFAULT_MAX_RECORDS = 100
-ABSOLUTE_MAX_RECORDS = 500
+ABSOLUTE_MAX_RECORDS = 1000
 
 PROFILE_TTL = 3600.0
 DETAIL_TTL = 300.0
@@ -286,6 +286,15 @@ class WhoopClient:
 
     async def sleep(self, sleep_id: str) -> dict[str, Any]:
         return await self._get(f"/v2/activity/sleep/{sleep_id}", ttl=DETAIL_TTL)
+
+    async def sleep_stream(self, sleep_id: str) -> dict[str, Any]:
+        """Granular in-sleep sensor stream (heart rate, skin temperature).
+
+        Present in WHOOP's OpenAPI spec but sparsely documented; some accounts
+        or app configurations may get 403/404 here — callers should degrade
+        gracefully.
+        """
+        return await self._get(f"/v2/activity/sleep/{sleep_id}/stream", ttl=PROFILE_TTL)
 
     async def workouts(
         self,

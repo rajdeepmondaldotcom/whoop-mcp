@@ -3,6 +3,7 @@ over in-memory streams, with the WHOOP API faked at the HTTP layer."""
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,12 +17,15 @@ pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
-async def session(fake_whoop: FakeWhoop):
+async def session(fake_whoop: FakeWhoop, tmp_path):
+    from whoop_mcp.config import Settings
+
     fake_whoop.seed_days(35)
     client = WhoopClient(
         StaticTokens(), transport=httpx.MockTransport(fake_whoop.handler), cache_ttl=300.0
     )
-    srv.configure_for_testing(client, tz=timezone.utc)
+    settings = Settings(client_id="cid", client_secret="secret", data_dir=tmp_path)
+    srv.configure_for_testing(client, tz=timezone.utc, settings=settings)
     try:
         async with create_connected_server_and_client_session(srv.mcp) as client_session:
             yield client_session
@@ -29,12 +33,30 @@ async def session(fake_whoop: FakeWhoop):
         await srv.reset_state()
 
 
-async def test_lists_sixteen_read_only_tools(session):
+WRITE_TOOLS = {"connect_whoop_account", "export_data"}
+
+
+async def test_lists_all_tools_with_correct_annotations(session):
     tools = (await session.list_tools()).tools
-    assert len(tools) == 16
-    assert all(t.annotations and t.annotations.readOnlyHint for t in tools)
+    assert len(tools) == 23
+    for tool in tools:
+        assert tool.annotations is not None, tool.name
+        expected_read_only = tool.name not in WRITE_TOOLS
+        assert tool.annotations.readOnlyHint is expected_read_only, tool.name
     names = {t.name for t in tools}
-    assert {"get_daily_summary", "search", "fetch", "compare_periods"} <= names
+    assert {
+        "get_daily_summary",
+        "get_health_overview",
+        "get_correlations",
+        "get_personal_records",
+        "get_sleep_stream",
+        "export_data",
+        "connect_whoop_account",
+        "get_connection_status",
+        "search",
+        "fetch",
+        "compare_periods",
+    } <= names
 
 
 async def test_get_profile(session):
@@ -154,6 +176,117 @@ async def test_invalid_date_expression_is_clean_error(session):
     result = await session.call_tool("get_daily_summary", {"day": "someday maybe"})
     assert result.isError
     assert "Supported forms" in result.content[0].text
+
+
+async def test_health_overview_is_holistic(session):
+    data = result_json(await session.call_tool("get_health_overview", {"days": 30}))
+    assert "today" in data
+    assert data["trends"]["recovery"]["recovery_score"]["average"] > 0
+    assert "direction" in data["trends"]["recovery"]["recovery_score"]
+    assert data["records"]["best_recovery"]["value"] >= data["records"]["worst_recovery"]["value"]
+    assert data["training_load"]["ratio"] > 0
+    assert isinstance(data["correlations"], list) and data["correlations"]
+
+
+async def test_correlations_shape(session):
+    data = result_json(await session.call_tool("get_correlations", {"days": 30}))
+    assert data["days_analyzed"] >= 28
+    pairs = {c["pair"] for c in data["correlations"]}
+    assert "day strain vs next-morning recovery" in pairs
+    for item in data["correlations"]:
+        assert "note" in item or (-1.0 <= item["r"] <= 1.0 and item["n"] >= 10)
+
+
+async def test_personal_records_and_streaks(session):
+    data = result_json(await session.call_tool("get_personal_records", {"days": 30}))
+    assert data["green_streak"]["longest_days"] >= 1
+    assert data["best_recovery"]["value"] <= 100
+    assert data["biggest_workout"]["sport"] in ("running", "cycling")
+    assert data["totals"]["workouts"] > 0
+
+
+async def test_sleep_stream_available_and_unavailable(session, fake_whoop: FakeWhoop):
+    sleep = fake_whoop.sleeps[-2]
+    from whoop_mcp.timeutil import parse_iso
+
+    fake_whoop.seed_stream(sleep["id"], parse_iso(sleep["start"]), parse_iso(sleep["end"]))
+    data = result_json(
+        await session.call_tool(
+            "get_sleep_stream", {"sleep_id": sleep["id"], "resolution_minutes": 10}
+        )
+    )
+    assert data["available"] is True
+    assert data["heart_rate"]["min"] < data["heart_rate"]["max"]
+    assert data["heart_rate"]["min"] == 48
+    assert len(data["series"]) >= 40  # ~7.75h at 10-minute buckets
+    assert data["pct_asleep"] > 90
+
+    no_stream = result_json(
+        await session.call_tool("get_sleep_stream", {"sleep_id": fake_whoop.sleeps[0]["id"]})
+    )
+    assert no_stream["available"] is False
+    assert "stream" in no_stream["note"]
+
+
+async def test_export_data_writes_files(session, tmp_path):
+    import csv as csv_module
+
+    data = result_json(
+        await session.call_tool("export_data", {"start": "14 days ago", "end": "today"})
+    )
+    assert data["counts"]["cycles"] >= 14
+    assert data["counts"]["sleeps"] >= 14
+
+    export_dir = Path(data["directory"])
+    assert export_dir.is_relative_to(tmp_path)
+    payload = json.loads((export_dir / "data.json").read_text())
+    assert payload["meta"]["complete"] is True
+    assert len(payload["data"]["cycles"]) == data["counts"]["cycles"]
+    assert "raw" in payload
+
+    with (export_dir / "daily_summary.csv").open() as handle:
+        rows = list(csv_module.DictReader(handle))
+    assert len(rows) >= 13
+    assert {"date", "recovery", "sleep_hours", "strain"} <= set(rows[0])
+
+
+async def test_connection_status_disconnected_and_connected(session, tmp_path):
+    data = result_json(await session.call_tool("get_connection_status", {}))
+    assert data["connected"] is False
+    assert "how_to_connect" in data
+
+    # Simulate a completed auth: tokens on disk.
+    import time as time_module
+
+    from whoop_mcp.tokens import TokenSet, TokenStore
+
+    TokenStore(tmp_path / "tokens.json").save(
+        TokenSet("test-token", "refresh", time_module.time() + 3600, scope="offline read:sleep")
+    )
+    data = result_json(await session.call_tool("get_connection_status", {}))
+    assert data["connected"] is True
+    assert data["api_reachable"] is True
+    assert data["authorized_as"] == "Ada Lovelace"
+
+
+async def test_connect_tool_without_credentials_returns_steps(session, fake_whoop, tmp_path):
+    from whoop_mcp.config import Settings
+
+    srv.configure_for_testing(
+        srv._state.client, settings=Settings(data_dir=tmp_path)  # no client id/secret
+    )
+    data = result_json(await session.call_tool("connect_whoop_account", {}))
+    assert data["connected"] is False
+    assert any("developer-dashboard.whoop.com" in step for step in data["steps"])
+
+
+async def test_include_raw_attaches_original_record(session, fake_whoop: FakeWhoop):
+    sleep_id = fake_whoop.sleeps[0]["id"]
+    data = result_json(
+        await session.call_tool("get_sleep", {"sleep_id": sleep_id, "include_raw": True})
+    )
+    assert data["raw"]["id"] == sleep_id
+    assert "stage_summary" in data["raw"]["score"]
 
 
 async def test_resources_and_prompts(session):

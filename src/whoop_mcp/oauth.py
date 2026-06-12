@@ -16,6 +16,7 @@ import secrets
 import threading
 import urllib.parse
 import webbrowser
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
@@ -157,13 +158,9 @@ def _make_handler(result: _CallbackResult, expected_path: str):
     return CallbackHandler
 
 
-def run_interactive_auth(
-    settings: Settings,
-    *,
-    open_browser: bool = True,
-    timeout: float = AUTH_TIMEOUT_SECONDS,
-) -> TokenSet:
-    """Run the full browser authorization flow and return the token set."""
+def _start_callback_server(settings: Settings) -> tuple[HTTPServer, _CallbackResult, str, str]:
+    """Validate the redirect URI, bind the callback server, return (server,
+    result, state, authorize_url). The server is already serving on a thread."""
     settings.require_oauth_app()
 
     redirect = urllib.parse.urlparse(settings.redirect_uri)
@@ -189,23 +186,32 @@ def run_interactive_auth(
             "redirect URI in the WHOOP dashboard and set WHOOP_REDIRECT_URI."
         ) from exc
 
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, result, state, build_authorize_url(settings, state)
 
-    url = build_authorize_url(settings, state)
+
+async def authorize_interactive_async(
+    settings: Settings,
+    *,
+    open_browser: bool = True,
+    timeout: float = AUTH_TIMEOUT_SECONDS,
+    on_url: Callable[[str], None] | None = None,
+) -> TokenSet:
+    """Browser authorization flow, safe inside a running event loop (and a
+    running MCP server — nothing here writes to stdout)."""
+    server, result, state, url = _start_callback_server(settings)
     try:
-        print(f"Opening WHOOP authorization page:\n  {url}\n")
+        if on_url is not None:
+            on_url(url)
         if open_browser:
-            opened = webbrowser.open(url)
+            opened = await asyncio.to_thread(webbrowser.open, url)
             if not opened:
-                print("Could not launch a browser automatically — open the URL above manually.")
-        else:
-            print("Open the URL above in a browser to continue.")
-
-        if not result.event.wait(timeout):
+                logger.warning("Could not launch a browser; the URL must be opened manually")
+        arrived = await asyncio.to_thread(result.event.wait, timeout)
+        if not arrived:
             raise WhoopError(
                 f"Timed out after {int(timeout)}s waiting for the WHOOP redirect. "
-                "Re-run `whoop-mcp auth` and complete the consent screen."
+                "Start the authorization again and complete the consent screen."
             )
     finally:
         server.shutdown()
@@ -218,7 +224,27 @@ def run_interactive_auth(
     if result.state != state:
         raise WhoopError(
             "OAuth state mismatch — the redirect did not come from the request we "
-            "started. Re-run `whoop-mcp auth`."
+            "started. Start the authorization again."
         )
 
-    return asyncio.run(exchange_code(settings, result.code))
+    return await exchange_code(settings, result.code)
+
+
+def run_interactive_auth(
+    settings: Settings,
+    *,
+    open_browser: bool = True,
+    timeout: float = AUTH_TIMEOUT_SECONDS,
+) -> TokenSet:
+    """Synchronous wrapper for the CLI: prints the URL and runs the flow."""
+
+    def announce(url: str) -> None:
+        print(f"Opening WHOOP authorization page:\n  {url}\n")
+        if not open_browser:
+            print("Open the URL above in a browser to continue.")
+
+    return asyncio.run(
+        authorize_interactive_async(
+            settings, open_browser=open_browser, timeout=timeout, on_url=announce
+        )
+    )

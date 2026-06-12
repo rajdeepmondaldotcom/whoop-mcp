@@ -115,6 +115,45 @@ def test_transform_workout_zones_and_distance():
     assert ms_to_hours(None) is None
 
 
+def test_transform_sleep_stream_downsamples_and_summarizes():
+    from whoop_mcp.transform import transform_sleep_stream
+
+    start = datetime(2026, 6, 10, 4, 0, tzinfo=UTC)
+    points = []
+    for minute in range(120):  # 2 hours, one point per minute
+        points.append(
+            {
+                "timestamp": (start + timedelta(minutes=minute)).strftime(
+                    "%Y-%m-%dT%H:%M:%S.000Z"
+                ),
+                "hr": 60 if minute < 60 else 48,
+                "skin_temp": 33.0 + minute * 0.01,
+                "is_sleeping": minute > 5,
+            }
+        )
+    out = transform_sleep_stream(
+        {"stream": points, "algorithm_version": "5.0"},
+        offset="-04:00",
+        resolution_minutes=10,
+    )
+    assert out["data_points"] == 120
+    assert len(out["series"]) == 12  # 120 minutes at 10-minute buckets
+    assert out["heart_rate"]["min"] == 48
+    assert out["heart_rate"]["max"] == 60
+    assert out["heart_rate"]["avg"] == 54
+    assert out["from"] == "00:00"  # 04:00 UTC at -04:00
+    assert out["pct_asleep"] == 95
+    assert out["series"][0]["hr"] == 60
+    assert out["series"][-1]["hr"] == 48
+
+
+def test_transform_sleep_stream_empty():
+    from whoop_mcp.transform import transform_sleep_stream
+
+    out = transform_sleep_stream({"stream": []}, offset=None)
+    assert "no data points" in out["note"]
+
+
 def test_transform_workout_tolerates_legacy_zone_key():
     start = datetime(2026, 6, 10, 16, 0, tzinfo=UTC)
     workout = make_workout("wid", start, start + timedelta(minutes=30))

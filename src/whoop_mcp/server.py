@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
@@ -30,9 +31,13 @@ from whoop_mcp import oauth
 from whoop_mcp.client import WhoopClient
 from whoop_mcp.config import Settings, load_settings
 from whoop_mcp.errors import ApiError, WhoopError
+from whoop_mcp.export import run_export
 from whoop_mcp.summaries import (
     aggregate_period,
+    build_correlations,
     build_daily_summary,
+    build_health_overview,
+    build_personal_records,
     build_weekly_report,
     compare_aggregates,
     cycle_date,
@@ -44,7 +49,13 @@ from whoop_mcp.summaries import (
     strain_trends,
     workout_date,
 )
-from whoop_mcp.timeutil import day_bounds, parse_point, resolve_tz, week_bounds_for
+from whoop_mcp.timeutil import (
+    day_bounds,
+    parse_point,
+    record_local_date,
+    resolve_tz,
+    week_bounds_for,
+)
 from whoop_mcp.tokens import TokenManager, TokenStore
 from whoop_mcp.transform import (
     duration_between,
@@ -57,6 +68,7 @@ from whoop_mcp.transform import (
     transform_profile,
     transform_recovery,
     transform_sleep,
+    transform_sleep_stream,
     transform_workout,
 )
 
@@ -78,12 +90,17 @@ Key concepts:
 Usage:
 - Start with get_daily_summary for "how am I doing" questions; it combines recovery,
   sleep, strain, and workouts for one day.
+- get_health_overview is the holistic view: current status + trends + training load +
+  personal records + behavior correlations in one call.
 - Use the trends tools (get_recovery_trends / get_sleep_trends / get_strain_trends)
-  for patterns over weeks, and compare_periods for before/after questions.
+  for daily tables, compare_periods for before/after questions, get_correlations for
+  "what affects my recovery", and get_sleep_stream for minute-level overnight data.
 - Date parameters accept: {DATE_FORMS}.
 
-If a tool reports that authorization is required, tell the user to run
-`whoop-mcp auth` in a terminal and retry."""
+If a tool reports that authorization is required: the user can either run
+`whoop-mcp setup` in a terminal, or — if they explicitly ask you to connect —
+call the connect_whoop_account tool, which opens their browser for WHOOP consent.
+Check get_connection_status when unsure."""
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 
@@ -132,11 +149,15 @@ async def get_client() -> WhoopClient:
     return _state.client
 
 
-def configure_for_testing(client: WhoopClient, tz: tzinfo | None = None) -> None:
-    """Inject a client (and optionally a timezone) — used by the test suite."""
+def configure_for_testing(
+    client: WhoopClient, tz: tzinfo | None = None, settings: Settings | None = None
+) -> None:
+    """Inject a client (and optionally timezone/settings) — used by the test suite."""
     _state.client = client
     if tz is not None:
         _state.tz = tz
+    if settings is not None:
+        _state.settings = settings
 
 
 async def reset_state() -> None:
@@ -207,7 +228,7 @@ async def _trend_bundle(days: int):
         await get_client(),
         query_start,
         query_end,
-        max_records=min(days * 4 + 20, 500),
+        max_records=min(days * 4 + 20, 1000),
     )
     return bundle, start_day, today
 
@@ -345,10 +366,15 @@ async def get_sleeps(
     title="Sleep by id",
     annotations=READ_ONLY,
 )
-async def get_sleep(sleep_id: str) -> dict[str, Any]:
-    """Get one sleep record by its UUID (from get_sleeps or a recovery's sleep_id)."""
+async def get_sleep(sleep_id: str, include_raw: bool = False) -> dict[str, Any]:
+    """Get one sleep record by its UUID (from get_sleeps or a recovery's sleep_id).
+    Set include_raw=true to also attach WHOOP's untouched API record."""
     client = await get_client()
-    return transform_sleep(await client.sleep(sleep_id))
+    raw = await client.sleep(sleep_id)
+    out = transform_sleep(raw)
+    if include_raw:
+        out["raw"] = raw
+    return out
 
 
 @mcp.tool(
@@ -391,10 +417,15 @@ async def get_workouts(
     title="Workout by id",
     annotations=READ_ONLY,
 )
-async def get_workout(workout_id: str) -> dict[str, Any]:
-    """Get one workout by its UUID (from get_workouts)."""
+async def get_workout(workout_id: str, include_raw: bool = False) -> dict[str, Any]:
+    """Get one workout by its UUID (from get_workouts). Set include_raw=true to
+    also attach WHOOP's untouched API record."""
     client = await get_client()
-    return transform_workout(await client.workout(workout_id))
+    raw = await client.workout(workout_id)
+    out = transform_workout(raw)
+    if include_raw:
+        out["raw"] = raw
+    return out
 
 
 @mcp.tool(
@@ -422,10 +453,14 @@ async def get_cycles(
     annotations=READ_ONLY,
 )
 async def get_cycle(
-    cycle_id: int, include_recovery: bool = True, include_sleep: bool = True
+    cycle_id: int,
+    include_recovery: bool = True,
+    include_sleep: bool = True,
+    include_raw: bool = False,
 ) -> dict[str, Any]:
     """Get one cycle by id, optionally with the recovery and sleep that belong
-    to it (WHOOP links each recovery and primary sleep to a cycle)."""
+    to it (WHOOP links each recovery and primary sleep to a cycle). Set
+    include_raw=true to also attach WHOOP's untouched API records."""
     client = await get_client()
 
     async def _optional(coro) -> dict[str, Any] | None:
@@ -441,11 +476,15 @@ async def get_cycle(
         _optional(client.cycle_recovery(cycle_id)) if include_recovery else _noop(),
         _optional(client.cycle_sleep(cycle_id)) if include_sleep else _noop(),
     )
-    result = {"cycle": transform_cycle(cycle_raw)}
+    result: dict[str, Any] = {"cycle": transform_cycle(cycle_raw)}
     if include_recovery:
         result["recovery"] = transform_recovery(recovery_raw) if recovery_raw else None
     if include_sleep:
         result["sleep"] = transform_sleep(sleep_raw) if sleep_raw else None
+    if include_raw:
+        result["raw"] = prune(
+            {"cycle": cycle_raw, "recovery": recovery_raw, "sleep": sleep_raw}
+        )
     return prune(result) or {"cycle": None}
 
 
@@ -539,7 +578,7 @@ async def compare_periods(
     )
     agg_a = aggregate_period(bundle_a, a_start, a_end)
     agg_b = aggregate_period(bundle_b, b_start, b_end)
-    result = {
+    result: dict[str, Any] = {
         "period_a": agg_a,
         "period_b": agg_b,
         "comparison": compare_aggregates(agg_a, agg_b),
@@ -551,6 +590,212 @@ async def compare_periods(
             "averages may be based on partial data."
         ]
     return result
+
+
+@mcp.tool(
+    title="Health overview",
+    annotations=READ_ONLY,
+)
+async def get_health_overview(days: int = 90) -> dict[str, Any]:
+    """The holistic everything-at-once view (7-180 day window): today's status,
+    recovery/sleep/strain trend directions, training load, personal records and
+    streaks, and the strongest behavior-physiology correlations. The best first
+    call for "give me the full picture of my health"."""
+    bundle, start_day, today = await _trend_bundle(days)
+    return build_health_overview(bundle, start_day, today, today=today)
+
+
+@mcp.tool(
+    title="Behavior correlations",
+    annotations=READ_ONLY,
+)
+async def get_correlations(days: int = 90) -> dict[str, Any]:
+    """How the user's metrics move together day-to-day (7-180 day window):
+    strain vs next-morning recovery, sleep duration vs recovery, sleep
+    consistency vs recovery, strain vs that night's sleep, HRV vs recovery.
+    Pearson r with strength labels and plain-English interpretations —
+    correlation, not causation."""
+    bundle, start_day, today = await _trend_bundle(days)
+    return build_correlations(bundle, start_day, today)
+
+
+@mcp.tool(
+    title="Personal records & streaks",
+    annotations=READ_ONLY,
+)
+async def get_personal_records(days: int = 180) -> dict[str, Any]:
+    """Bests, worsts, and streaks over a window (7-180 days): best/worst
+    recovery, highest HRV, lowest resting heart rate, longest sleep, highest
+    strain day, biggest workout, green-recovery streaks, and totals."""
+    bundle, start_day, today = await _trend_bundle(days)
+    return build_personal_records(bundle, start_day, today)
+
+
+@mcp.tool(
+    title="Sleep sensor stream",
+    annotations=READ_ONLY,
+)
+async def get_sleep_stream(sleep_id: str, resolution_minutes: int = 5) -> dict[str, Any]:
+    """Minute-level overnight sensor data for one sleep: heart rate and skin
+    temperature curves (downsampled to resolution_minutes buckets) plus
+    overnight stats like the lowest heart rate and when it happened. Get the
+    sleep_id from get_sleeps, get_daily_summary, or a recovery record. WHOOP
+    does not expose this stream for every account/app — if unavailable, a
+    clear note is returned instead of an error."""
+    client = await get_client()
+    sleep = await client.sleep(sleep_id)
+    try:
+        stream = await client.sleep_stream(sleep_id)
+    except ApiError as exc:
+        if exc.status_code in (403, 404):
+            return {
+                "sleep_id": sleep_id,
+                "available": False,
+                "note": (
+                    f"WHOOP did not expose a sensor stream for this sleep "
+                    f"(HTTP {exc.status_code}). The stream endpoint is not enabled for "
+                    "every account or app; nightly summary data is still available via "
+                    "get_sleep."
+                ),
+            }
+        raise
+    out = transform_sleep_stream(
+        stream or {},
+        offset=sleep.get("timezone_offset"),
+        resolution_minutes=resolution_minutes,
+    )
+    out["sleep_id"] = sleep_id
+    out["available"] = True
+    if sleep.get("end"):
+        out["date"] = str(record_local_date(sleep["end"], sleep.get("timezone_offset")))
+    return out
+
+
+@mcp.tool(
+    title="Export all WHOOP data",
+    annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False),
+)
+async def export_data(
+    start: str = "2 years ago", end: str = "today", include_raw: bool = True
+) -> dict[str, Any]:
+    """Export every WHOOP record in a date range to local files on this
+    machine: data.json (complete transformed dataset, plus raw API records
+    when include_raw is true), daily_summary.csv (one row per day), and
+    workouts.csv. Nothing is uploaded anywhere. Returns the file paths and
+    record counts. Large ranges can take a minute or two.
+
+    `start`/`end` accept: N years ago | N months ago | YYYY-MM-DD | ISO datetime.
+    """
+    tz = get_tz()
+    start_dt = parse_point(start, tz=tz)
+    end_dt = parse_point(end, tz=tz, end=True)
+    if end_dt < start_dt:
+        raise WhoopError(f"end ({end}) is before start ({start}).")
+    return await run_export(
+        await get_client(),
+        start=start_dt,
+        end=end_dt,
+        data_dir=get_settings().data_dir,
+        include_raw=include_raw,
+    )
+
+
+# ----------------------------------------------------- connection management
+
+
+@mcp.tool(
+    title="WHOOP connection status",
+    annotations=READ_ONLY,
+)
+async def get_connection_status() -> dict[str, Any]:
+    """Whether this server is connected to a WHOOP account: app credentials,
+    token state and expiry, granted scopes, and a live API check. Call this
+    first when WHOOP data tools fail."""
+    settings = get_settings()
+    tokens = TokenStore(settings.tokens_path).load()
+    configured = bool(settings.client_id and settings.client_secret)
+    connected = bool(tokens) or bool(settings.static_access_token)
+
+    out: dict[str, Any] = {
+        "connected": connected,
+        "app_credentials_configured": configured or bool(settings.static_access_token),
+        "data_dir": str(settings.data_dir),
+    }
+    if settings.static_access_token:
+        out["mode"] = "static token from WHOOP_ACCESS_TOKEN (no auto-refresh)"
+    elif tokens:
+        out["token_expires_in_minutes"] = max(int((tokens.expires_at - time.time()) // 60), 0)
+        out["auto_refresh"] = bool(tokens.refresh_token)
+        if tokens.scope:
+            out["scopes"] = tokens.scope
+
+    if connected:
+        try:
+            profile = await (await get_client()).profile()
+            name = " ".join(
+                part
+                for part in ((profile or {}).get("first_name"), (profile or {}).get("last_name"))
+                if part
+            )
+            out["authorized_as"] = name or f"user {(profile or {}).get('user_id')}"
+            out["api_reachable"] = True
+        except WhoopError as exc:
+            out["api_reachable"] = False
+            out["api_error"] = str(exc)
+    else:
+        out["how_to_connect"] = (
+            "Run `whoop-mcp setup` in a terminal for the guided flow, or ask me to "
+            "connect your WHOOP account (I'll open the consent page in your browser)."
+        )
+    return out
+
+
+@mcp.tool(
+    title="Connect WHOOP account",
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+    ),
+)
+async def connect_whoop_account() -> dict[str, Any]:
+    """Connect or re-authorize the user's WHOOP account from inside the chat:
+    opens the WHOOP consent page in the user's browser on this machine and
+    waits up to 3 minutes for them to approve. Only call this when the user
+    explicitly asks to connect, reconnect, or fix authorization. Requires
+    WHOOP app credentials to be configured already (otherwise it returns
+    setup steps instead of opening anything)."""
+    settings = get_settings()
+    if settings.static_access_token:
+        return {"connected": True, "note": "Already using WHOOP_ACCESS_TOKEN from the environment."}
+    if not (settings.client_id and settings.client_secret):
+        return {
+            "connected": False,
+            "action_required": "Create a free WHOOP developer app first (one time, ~2 minutes).",
+            "steps": [
+                "1. Sign in at https://developer-dashboard.whoop.com and create a team + app.",
+                "2. Enable every scope (read:recovery, read:cycles, read:sleep, read:workout, "
+                "read:profile, read:body_measurement, offline) and register the redirect URI "
+                f"{settings.redirect_uri}",
+                "3. Run `whoop-mcp setup` in a terminal and paste the Client ID/Secret — then "
+                "ask me to connect again.",
+            ],
+        }
+
+    tokens = await oauth.authorize_interactive_async(settings, timeout=180)
+    TokenStore(settings.tokens_path).save(tokens)
+    client = await get_client()
+    client.clear_cache()
+    profile = await client.profile()
+    name = " ".join(
+        part
+        for part in ((profile or {}).get("first_name"), (profile or {}).get("last_name"))
+        if part
+    )
+    return {
+        "connected": True,
+        "authorized_as": name or f"user {(profile or {}).get('user_id')}",
+        "scopes": tokens.scope or None,
+        "note": "Tokens saved; they auto-refresh from now on.",
+    }
 
 
 # -------------------------------------------- ChatGPT connector compatibility

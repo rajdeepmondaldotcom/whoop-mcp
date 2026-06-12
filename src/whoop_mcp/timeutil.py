@@ -23,13 +23,15 @@ from zoneinfo import ZoneInfo
 from whoop_mcp.errors import WhoopError
 
 SUPPORTED_FORMS = (
-    "now | today | yesterday | N days ago | N weeks ago | last N days | "
+    "now | today | yesterday | N days/weeks/months/years ago | last N days | "
     "this week | last week | this month | last month | YYYY-MM | YYYY-MM-DD | "
     "ISO-8601 datetime"
 )
 
 _DAYS_AGO = re.compile(r"^(\d{1,4})\s*days?\s*ago$")
 _WEEKS_AGO = re.compile(r"^(\d{1,3})\s*weeks?\s*ago$")
+_MONTHS_AGO = re.compile(r"^(\d{1,3})\s*months?\s*ago$")
+_YEARS_AGO = re.compile(r"^(\d{1,2})\s*years?\s*ago$")
 _LAST_N_DAYS = re.compile(r"^(?:last|past)\s+(\d{1,4})\s*days?$")
 _MONTH = re.compile(r"^(\d{4})-(\d{2})$")
 _OFFSET = re.compile(r"^([+-])(\d{2}):(\d{2})$")
@@ -93,6 +95,11 @@ def parse_point(
         return _day_point(today - timedelta(days=int(match.group(1))), tz, end)
     if match := _WEEKS_AGO.match(text):
         return _day_point(today - timedelta(weeks=int(match.group(1))), tz, end)
+    if match := _MONTHS_AGO.match(text):
+        # Calendar-ish months: good enough for window starts.
+        return _day_point(today - timedelta(days=30 * int(match.group(1))), tz, end)
+    if match := _YEARS_AGO.match(text):
+        return _day_point(today - timedelta(days=365 * int(match.group(1))), tz, end)
     if match := _LAST_N_DAYS.match(text):
         # "last 7 days" = a 7-day window that includes today.
         days = max(int(match.group(1)), 1)
