@@ -1,0 +1,13 @@
+.git
+.venv
+.env
+*.local.md
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+dist
+tests
+docs
+.github
+exports

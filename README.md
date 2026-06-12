@@ -80,6 +80,7 @@ More questions worth asking: [docs/PROMPTS.md](docs/PROMPTS.md).
 | Windsurf | auto via setup |
 | VS Code | auto via setup, or [![Install in VS Code](https://img.shields.io/badge/VS_Code-install-0078d4)](https://insiders.vscode.dev/redirect/mcp/install?name=whoop&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22whoop-mcp-server%22%2C%22args%22%3A%5B%22serve%22%5D%7D) |
 | ChatGPT | remote connector, see below |
+| Docker | `docker build -t whoop-mcp-server . && docker run -i --rm -e WHOOP_MCP_DEMO=1 whoop-mcp-server` (mount `~/.whoop-mcp` for real data) |
 | Any MCP client | `command: whoop-mcp-server` with `args: ["serve"]`. Inspector: `npx @modelcontextprotocol/inspector whoop-mcp-server serve` |
 
 <details>
