@@ -2,7 +2,9 @@
 
 # whoop-mcp
 
-WHOOP measures your recovery, sleep, and strain all day. Then it shows you charts. This server connects the data to Claude, ChatGPT, and any MCP client, so you can ask real questions and get answers computed from your own records.
+Your WHOOP shows you charts. It can't answer "should I train hard today" or "what actually hurts my recovery". This server can.
+
+It connects your WHOOP data to Claude, ChatGPT, and any MCP client. You ask in plain English. It computes the answer from your own records and lets the AI explain it.
 
 [![CI](https://github.com/rajdeepmondaldotcom/whoop-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rajdeepmondaldotcom/whoop-mcp/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/rajdeepmondaldotcom/whoop-mcp)
@@ -72,7 +74,7 @@ More questions worth asking: [docs/PROMPTS.md](docs/PROMPTS.md).
 | --- | --- |
 | Claude Desktop | `whoop-mcp setup` configures it for you |
 | Claude Code | `claude mcp add whoop -- whoop-mcp serve` (setup offers this too) |
-| Cursor | auto via setup, or [![Install in Cursor](https://img.shields.io/badge/Cursor-install-black)](cursor://anysphere.cursor-deeplink/mcp/install?name=whoop&config=eyJjb21tYW5kIjoid2hvb3AtbWNwIiwiYXJncyI6WyJzZXJ2ZSJdfQ==) |
+| Cursor | auto via setup, or [![Install in Cursor](https://img.shields.io/badge/Cursor-install-black)](https://cursor.com/install-mcp?name=whoop&config=eyJjb21tYW5kIjoid2hvb3AtbWNwIiwiYXJncyI6WyJzZXJ2ZSJdfQ%3D%3D) |
 | Windsurf | auto via setup |
 | VS Code | auto via setup, or [![Install in VS Code](https://img.shields.io/badge/VS_Code-install-0078d4)](https://insiders.vscode.dev/redirect/mcp/install?name=whoop&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22whoop-mcp%22%2C%22args%22%3A%5B%22serve%22%5D%7D) |
 | ChatGPT | remote connector, see below |
@@ -96,7 +98,7 @@ Be careful here: a no-auth tunnel means anyone with the URL can read your health
 
 ## Why the answers hold up
 
-Models are bad at arithmetic over 90 days of records. So this server computes first and lets the model explain.
+The model is maybe 20% of this product. The other 80% is making the numbers right. Models are bad at arithmetic over 90 days of records, so this server computes first and lets the model explain.
 
 - Trend lines are fit to date-sorted series. WHOOP returns records newest-first. Fit arrival order instead and every trend reads backwards.
 - Direction respects what the metric means. Rising HRV is improvement. Rising resting heart rate is not.
