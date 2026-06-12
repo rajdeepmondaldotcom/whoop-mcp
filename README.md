@@ -74,7 +74,7 @@ More questions worth asking: [docs/PROMPTS.md](docs/PROMPTS.md).
 
 | Client | Setup |
 | --- | --- |
-| Claude Desktop | `whoop-mcp-server setup` configures it for you |
+| Claude Desktop | `whoop-mcp-server setup` configures it for you. No terminal at all: download `whoop-mcp-server.mcpb` from the [latest release](https://github.com/rajdeepmondaldotcom/whoop-mcp-server/releases/latest) and open it (needs [uv](https://docs.astral.sh/uv/) installed; demo mode is a toggle in its settings) |
 | Claude Code | `claude mcp add whoop -- whoop-mcp-server serve` (setup offers this too) |
 | Cursor | auto via setup, or [![Install in Cursor](https://img.shields.io/badge/Cursor-install-black)](https://cursor.com/install-mcp?name=whoop&config=eyJjb21tYW5kIjoid2hvb3AtbWNwLXNlcnZlciIsImFyZ3MiOlsic2VydmUiXX0%3D) |
 | Windsurf | auto via setup |

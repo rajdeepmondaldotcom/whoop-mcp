@@ -1,0 +1,57 @@
+{
+  "manifest_version": "0.3",
+  "name": "whoop-mcp-server",
+  "display_name": "WHOOP",
+  "version": "0.0.0",
+  "description": "Ask your AI anything about your WHOOP data. Recovery, sleep, strain, and workout analysis computed from your own records. Requires uv (https://docs.astral.sh/uv/).",
+  "author": {
+    "name": "Rajdeep Mondal",
+    "email": "rajdeep@rajdeepmondal.com",
+    "url": "https://rajdeepmondal.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rajdeepmondaldotcom/whoop-mcp-server"
+  },
+  "homepage": "https://github.com/rajdeepmondaldotcom/whoop-mcp-server",
+  "documentation": "https://github.com/rajdeepmondaldotcom/whoop-mcp-server#readme",
+  "license": "MIT",
+  "keywords": [
+    "whoop",
+    "health",
+    "fitness",
+    "recovery",
+    "sleep",
+    "strain"
+  ],
+  "server": {
+    "type": "python",
+    "mcp_config": {
+      "command": "uvx",
+      "args": [
+        "whoop-mcp-server==0.0.0",
+        "serve"
+      ],
+      "env": {
+        "WHOOP_MCP_DEMO": "${user_config.demo_mode}"
+      }
+    },
+    "entry_point": "server/main.py"
+  },
+  "user_config": {
+    "demo_mode": {
+      "type": "boolean",
+      "title": "Demo mode",
+      "description": "Serve 150 days of realistic generated data instead of a real WHOOP account. Try everything before connecting.",
+      "required": false,
+      "default": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  }
+}
