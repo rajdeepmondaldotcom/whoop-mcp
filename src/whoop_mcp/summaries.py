@@ -713,17 +713,29 @@ def build_personal_records(bundle: Bundle, start: date, end: date) -> dict[str, 
         day, value = (max if best else min)(rows, key=lambda pair: pair[1])
         return {"date": str(day), "value": rounded(value, 1)}
 
-    # Green-recovery streaks (>= 67%).
-    current_streak = longest_streak = 0
+    # Green-recovery streaks (>= 67%) — strictly consecutive calendar days; a
+    # day without recovery data breaks the streak rather than bridging it.
+    longest_streak = 0
     streak = 0
+    previous_day: date | None = None
+    last_recovery_day: date | None = None
     for day in sorted(table):
         recovery = table[day].get("recovery")
-        if recovery is not None and recovery >= 67:
-            streak += 1
+        if recovery is None:
+            continue
+        if recovery >= 67:
+            adjacent = previous_day is not None and (day - previous_day).days == 1
+            streak = streak + 1 if (adjacent and streak > 0) else 1
             longest_streak = max(longest_streak, streak)
-        elif recovery is not None:
+        else:
             streak = 0
-    current_streak = streak
+        previous_day = day
+        last_recovery_day = day
+    # "Current" only counts if the run reaches the end of the window (allowing
+    # one day of slack for a not-yet-scored morning).
+    current_streak = (
+        streak if last_recovery_day is not None and (end - last_recovery_day).days <= 1 else 0
+    )
 
     best_workout = None
     scored_workouts = [

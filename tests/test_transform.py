@@ -154,6 +154,17 @@ def test_transform_sleep_stream_empty():
     assert "no data points" in out["note"]
 
 
+def test_transform_sleep_stream_omits_pct_asleep_without_flags():
+    from whoop_mcp.transform import transform_sleep_stream
+
+    points = [
+        {"timestamp": f"2026-06-10T04:{m:02d}:00.000Z", "hr": 55} for m in range(20)
+    ]
+    out = transform_sleep_stream({"stream": points}, offset=None)
+    assert "pct_asleep" not in out  # unknown, not 0%
+    assert out["heart_rate"]["avg"] == 55
+
+
 def test_transform_workout_tolerates_legacy_zone_key():
     start = datetime(2026, 6, 10, 16, 0, tzinfo=UTC)
     workout = make_workout("wid", start, start + timedelta(minutes=30))

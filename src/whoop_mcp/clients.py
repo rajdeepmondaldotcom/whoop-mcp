@@ -56,6 +56,7 @@ def install_into_claude_desktop(binary: str | None = None) -> tuple[Path, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     config: dict = {}
+    original_corrupt = False
     if path.exists():
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -63,6 +64,7 @@ def install_into_claude_desktop(binary: str | None = None) -> tuple[Path, str]:
                 config = loaded
         except (OSError, json.JSONDecodeError):
             # Keep the broken original safe and start fresh.
+            original_corrupt = True
             shutil.copy2(path, path.with_suffix(".json.broken"))
 
     servers = config.setdefault("mcpServers", {})
@@ -73,7 +75,9 @@ def install_into_claude_desktop(binary: str | None = None) -> tuple[Path, str]:
     action = "updated" if existing else "added"
     servers[SERVER_KEY] = desired
 
-    if path.exists():
+    # Never let a corrupt original overwrite the last *good* backup — the
+    # .json.broken copy above already preserves the corrupt bytes.
+    if path.exists() and not original_corrupt:
         shutil.copy2(path, path.with_suffix(".json.bak"))
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")

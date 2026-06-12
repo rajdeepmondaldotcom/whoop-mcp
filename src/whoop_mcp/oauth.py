@@ -207,13 +207,23 @@ async def authorize_interactive_async(
             opened = await asyncio.to_thread(webbrowser.open, url)
             if not opened:
                 logger.warning("Could not launch a browser; the URL must be opened manually")
-        arrived = await asyncio.to_thread(result.event.wait, timeout)
+        # Wait in short slices so a cancelled tool call strands a worker
+        # thread for at most ~1s instead of the full timeout.
+        deadline = asyncio.get_running_loop().time() + timeout
+        arrived = False
+        while asyncio.get_running_loop().time() < deadline:
+            arrived = await asyncio.to_thread(result.event.wait, 1.0)
+            if arrived:
+                break
         if not arrived:
             raise WhoopError(
                 f"Timed out after {int(timeout)}s waiting for the WHOOP redirect. "
                 "Start the authorization again and complete the consent screen."
             )
     finally:
+        # Synchronous on purpose: cleanup must run even mid-cancellation, when
+        # another `await` would immediately re-raise and skip the close. The
+        # block is bounded by serve_forever's 0.5s poll interval.
         server.shutdown()
         server.server_close()
 

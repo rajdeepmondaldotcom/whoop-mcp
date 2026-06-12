@@ -45,12 +45,16 @@ def test_install_preserves_existing_servers_and_backs_up(tmp_path, monkeypatch):
 def test_install_survives_corrupt_config(tmp_path, monkeypatch):
     config_path = tmp_path / "claude_desktop_config.json"
     config_path.write_text("{not valid json")
+    # A good backup from an earlier run must never be clobbered by corrupt bytes.
+    good_backup = config_path.with_suffix(".json.bak")
+    good_backup.write_text(json.dumps({"mcpServers": {"precious": {"command": "x"}}}))
     monkeypatch.setattr(clients, "claude_desktop_config_path", lambda: config_path)
 
     path, action = clients.install_into_claude_desktop("/bin/whoop-mcp")
     assert action == "added"
     assert json.loads(path.read_text())["mcpServers"]["whoop"]
-    assert path.with_suffix(".json.broken").exists()  # original kept
+    assert path.with_suffix(".json.broken").exists()  # corrupt original kept
+    assert json.loads(good_backup.read_text())["mcpServers"]["precious"]  # untouched
 
 
 def test_claude_code_command_shape():

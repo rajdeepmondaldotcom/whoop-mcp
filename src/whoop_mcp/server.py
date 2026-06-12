@@ -659,6 +659,15 @@ async def get_sleep_stream(sleep_id: str, resolution_minutes: int = 5) -> dict[s
                 ),
             }
         raise
+    if not (stream or {}).get("stream"):
+        return {
+            "sleep_id": sleep_id,
+            "available": False,
+            "note": (
+                "WHOOP's stream endpoint responded but contained no data points for "
+                "this sleep. Nightly summary data is still available via get_sleep."
+            ),
+        }
     out = transform_sleep_stream(
         stream or {},
         offset=sleep.get("timezone_offset"),

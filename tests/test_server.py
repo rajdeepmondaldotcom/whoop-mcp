@@ -234,8 +234,10 @@ async def test_export_data_writes_files(session, tmp_path):
     data = result_json(
         await session.call_tool("export_data", {"start": "14 days ago", "end": "today"})
     )
-    assert data["counts"]["cycles"] >= 14
-    assert data["counts"]["sleeps"] >= 14
+    assert data["counts"]["cycles"] == 15  # 14 days ago .. today inclusive
+    # Every day's sleep must be present — including the FIRST day, whose sleep
+    # started the evening before the window (the classic off-by-one-night bug).
+    assert data["counts"]["sleeps"] == data["counts"]["cycles"]
 
     export_dir = Path(data["directory"])
     assert export_dir.is_relative_to(tmp_path)
@@ -246,8 +248,10 @@ async def test_export_data_writes_files(session, tmp_path):
 
     with (export_dir / "daily_summary.csv").open() as handle:
         rows = list(csv_module.DictReader(handle))
-    assert len(rows) >= 13
+    assert len(rows) == 15
     assert {"date", "recovery", "sleep_hours", "strain"} <= set(rows[0])
+    assert rows[0]["sleep_hours"] != ""  # first morning's sleep included
+    assert all(row["recovery"] != "" for row in rows)
 
 
 async def test_connection_status_disconnected_and_connected(session, tmp_path):

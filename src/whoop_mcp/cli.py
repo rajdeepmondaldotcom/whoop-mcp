@@ -100,14 +100,26 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"\n✓ Saved to {path} (0600 permissions).\n")
         settings = load_settings()
 
-    # Step 2 — authorize with WHOOP.
-    existing = TokenStore(settings.tokens_path).load()
-    if existing and not existing.expires_within(0):
+    # Step 2 — authorize with WHOOP. Prefer a silent refresh over a browser trip.
+    store = TokenStore(settings.tokens_path)
+    existing = store.load()
+    authorized = bool(existing and not existing.expires_within(120))
+    if not authorized and existing and existing.refresh_token:
+        try:
+            refreshed = asyncio.run(oauth.refresh_token(settings, existing.refresh_token))
+            if refreshed.refresh_token is None:
+                refreshed.refresh_token = existing.refresh_token
+            store.save(refreshed)
+            authorized = True
+            print("✓ Step 2/4 — refreshed your existing WHOOP authorization.\n")
+        except WhoopError:
+            authorized = False
+    elif authorized:
         print("✓ Step 2/4 — WHOOP account already connected.\n")
-    else:
+    if not authorized:
         print("Step 2/4 — Authorize with WHOOP (your browser will open)\n")
         tokens = oauth.run_interactive_auth(settings)
-        TokenStore(settings.tokens_path).save(tokens)
+        store.save(tokens)
         print(f"✓ Tokens saved to {settings.tokens_path}.\n")
 
     # Step 3 — verify end to end.
@@ -160,12 +172,16 @@ def cmd_setup(args: argparse.Namespace) -> int:
         if answer.strip().lower() not in ("n", "no"):
             import subprocess
 
-            result = subprocess.run(command, capture_output=True, text=True)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            stderr = result.stderr.strip()
             if result.returncode == 0:
                 configured_any = True
                 print("  ✓ Registered with Claude Code (user scope).")
+            elif "already exists" in stderr.lower():
+                configured_any = True
+                print("  ✓ Already registered with Claude Code.")
             else:
-                print(f"  ✗ `{' '.join(command)}` failed: {result.stderr.strip()[:200]}")
+                print(f"  ✗ `{' '.join(command)}` failed: {stderr[:200]}")
                 print("    Run it manually if needed.")
     if not configured_any:
         print("  Manual config (any MCP client):")
@@ -447,6 +463,9 @@ def main(argv: list[str] | None = None) -> None:
     except WhoopError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
+    except EOFError:
+        print("\naborted (end of input)", file=sys.stderr)
+        sys.exit(130)
     except KeyboardInterrupt:
         sys.exit(130)
 

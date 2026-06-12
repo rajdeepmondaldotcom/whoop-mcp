@@ -23,8 +23,15 @@ from pathlib import Path
 from typing import Any
 
 from whoop_mcp.client import WhoopClient
-from whoop_mcp.summaries import Bundle, _daily_metric_table
-from whoop_mcp.timeutil import record_local_date
+from whoop_mcp.errors import RateLimitError
+from whoop_mcp.summaries import (
+    Bundle,
+    _daily_metric_table,
+    cycle_date,
+    sleep_date,
+    workout_date,
+)
+from whoop_mcp.timeutil import parse_iso, record_local_date
 from whoop_mcp.transform import (
     prune,
     recovery_zone,
@@ -69,8 +76,12 @@ WORKOUT_COLUMNS = (
 
 async def _fetch_everything(
     client: WhoopClient, start: datetime, end: datetime
-) -> tuple[Bundle, bool]:
-    """Fetch all four collections across the range in chunked windows."""
+) -> tuple[Bundle, bool, bool]:
+    """Fetch all four collections across the range in chunked windows.
+
+    Returns (bundle, truncated, rate_limited). On a hard rate-limit the
+    already-fetched chunks are returned rather than thrown away.
+    """
     bundle = Bundle()
     seen: dict[str, set] = {
         "cycles": set(),
@@ -79,16 +90,22 @@ async def _fetch_everything(
         "workouts": set(),
     }
     any_truncated = False
+    rate_limited = False
 
     cursor = start
     while cursor < end:
         chunk_end = min(cursor + timedelta(days=CHUNK_DAYS), end)
-        results = await asyncio.gather(
-            client.cycles(cursor, chunk_end, CHUNK_MAX_RECORDS),
-            client.recoveries(cursor, chunk_end, CHUNK_MAX_RECORDS),
-            client.sleeps(cursor, chunk_end, CHUNK_MAX_RECORDS),
-            client.workouts(cursor, chunk_end, CHUNK_MAX_RECORDS),
-        )
+        try:
+            results = await asyncio.gather(
+                client.cycles(cursor, chunk_end, CHUNK_MAX_RECORDS),
+                client.recoveries(cursor, chunk_end, CHUNK_MAX_RECORDS),
+                client.sleeps(cursor, chunk_end, CHUNK_MAX_RECORDS),
+                client.workouts(cursor, chunk_end, CHUNK_MAX_RECORDS),
+            )
+        except RateLimitError:
+            rate_limited = True
+            any_truncated = True
+            break
         for (records, truncated), kind, target in zip(
             results,
             ("cycles", "recoveries", "sleeps", "workouts"),
@@ -102,6 +119,9 @@ async def _fetch_everything(
                     if kind == "recoveries"
                     else record.get("id")
                 )
+                if key in (None, (None, None)):
+                    target.append(record)  # malformed record; keep, never dedupe
+                    continue
                 if key in seen[kind]:
                     continue
                 seen[kind].add(key)
@@ -109,7 +129,7 @@ async def _fetch_everything(
         cursor = chunk_end
         if cursor < end:
             await asyncio.sleep(0.2)  # be gentle with the per-minute quota
-    return bundle, any_truncated
+    return bundle, any_truncated, rate_limited
 
 
 def _sort_key(record: dict[str, Any], field: str = "start") -> str:
@@ -125,8 +145,37 @@ async def run_export(
     include_raw: bool = True,
 ) -> dict[str, Any]:
     began = time.monotonic()
-    bundle, truncated = await _fetch_everything(client, start, end)
+    # Pad the fetch by a day each side: WHOOP filters on record *start*, but a
+    # night's sleep belongs to the wake-up day — without padding, the first
+    # morning's sleep (started the previous evening) would be missing.
+    bundle, truncated, rate_limited = await _fetch_everything(
+        client, start - timedelta(days=1), end + timedelta(days=1)
+    )
     profile, body = await asyncio.gather(client.profile(), client.body_measurement())
+
+    # Keep records that *belong* to a day inside the requested range, by each
+    # record's own local-day attribution.
+    start_day, end_day = start.date(), end.date()
+    bundle.cycles = [
+        c for c in bundle.cycles if (d := cycle_date(c)) and start_day <= d <= end_day
+    ]
+    bundle.sleeps = [
+        s for s in bundle.sleeps if (d := sleep_date(s)) and start_day <= d <= end_day
+    ]
+    bundle.workouts = [
+        w for w in bundle.workouts if (d := workout_date(w)) and start_day <= d <= end_day
+    ]
+    kept_cycle_ids = {c.get("id") for c in bundle.cycles}
+    bundle.recoveries = [
+        r
+        for r in bundle.recoveries
+        if r.get("cycle_id") in kept_cycle_ids
+        or (
+            r.get("cycle_id") not in kept_cycle_ids
+            and r.get("created_at")
+            and start_day <= parse_iso(r["created_at"]).date() <= end_day
+        )
+    ]
 
     bundle.cycles.sort(key=_sort_key)
     bundle.sleeps.sort(key=_sort_key)
@@ -219,7 +268,13 @@ async def run_export(
         "bytes_written": sum(p.stat().st_size for p in (json_path, daily_path, workouts_path)),
         "took_seconds": round(time.monotonic() - began, 1),
     }
-    if truncated:
+    if rate_limited:
+        result["note"] = (
+            "WHOOP's rate limit interrupted the export partway; the files contain "
+            "everything fetched up to that point. Wait a minute and export the "
+            "remaining range separately."
+        )
+    elif truncated:
         result["note"] = (
             "At least one window hit the per-window record cap; the export may be "
             "missing records in that window. Narrow the range and re-export if counts "

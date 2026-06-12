@@ -108,6 +108,35 @@ def test_weekly_report_grid_and_averages():
     assert "notes" not in out  # completed week, nothing truncated
 
 
+def test_green_streaks_require_consecutive_days():
+    from whoop_mcp.summaries import build_personal_records
+
+    bundle = Bundle()
+
+    def add_day(day: date, score: float) -> None:
+        wake = datetime.combine(day, datetime.min.time(), tzinfo=UTC).replace(hour=7)
+        cycle_id = int(day.strftime("%Y%m%d"))
+        bundle.cycles.append(make_cycle(cycle_id, wake, wake + timedelta(days=1)))
+        bundle.recoveries.append(
+            make_recovery(cycle_id, f"s-{cycle_id}", created=wake, score=score)
+        )
+
+    # Green day, 20-day gap, then two consecutive green days.
+    add_day(date(2026, 6, 1), 80.0)
+    add_day(date(2026, 6, 21), 75.0)
+    add_day(date(2026, 6, 22), 90.0)
+
+    out = build_personal_records(bundle, date(2026, 6, 1), date(2026, 6, 22))
+    # The gap must break the streak: longest is 2, not 3.
+    assert out["green_streak"]["longest_days"] == 2
+    assert out["green_streak"]["current_days"] == 2
+
+    # If the window extends well past the last data day, the streak is stale.
+    out = build_personal_records(bundle, date(2026, 6, 1), date(2026, 6, 30))
+    assert out["green_streak"]["current_days"] == 0
+    assert out["green_streak"]["longest_days"] == 2
+
+
 def test_aggregate_and_compare_periods():
     week_a_monday = date(2026, 6, 1)
     week_b_monday = date(2026, 6, 8)

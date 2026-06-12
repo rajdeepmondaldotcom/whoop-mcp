@@ -317,13 +317,16 @@ def transform_sleep_stream(
     hr_values: list[tuple[str, float]] = []
     temp_values: list[float] = []
     sleeping = 0
+    has_sleep_flags = False
     for point in points:
         if point.get("hr") is not None:
             hr_values.append((point["timestamp"], float(point["hr"])))
         if point.get("skin_temp") is not None:
             temp_values.append(float(point["skin_temp"]))
-        if point.get("is_sleeping"):
-            sleeping += 1
+        if "is_sleeping" in point:
+            has_sleep_flags = True
+            if point["is_sleeping"]:
+                sleeping += 1
         index = int(
             (parse_iso(point["timestamp"]) - first_ts).total_seconds() * 1000 // bucket_ms
         )
@@ -377,7 +380,9 @@ def transform_sleep_stream(
             "from": local_clock(points[0]["timestamp"]),
             "to": local_clock(points[-1]["timestamp"]),
             "data_points": len(points),
-            "pct_asleep": int(round(sleeping / len(points) * 100)),
+            "pct_asleep": (
+                int(round(sleeping / len(points) * 100)) if has_sleep_flags else None
+            ),
             "heart_rate": heart_rate,
             "skin_temp": skin_temp,
             "resolution_minutes": resolution_minutes,
